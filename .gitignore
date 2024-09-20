@@ -1,0 +1,15 @@
+*.db
+/.venv/
+/chroma.log
+/chroma_data/
+/bin/
+/tmp/
+/dist/
+/node_modules/
+/web/templates/*.go
+/web/templates/*.txt
+/web/public/htmx.min.js
+/web/public/response-targets.js
+tailwindcss
+*.vim
+
