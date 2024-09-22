@@ -11,6 +11,7 @@ import (
 
 	"github.com/tmc/langchaingo/documentloaders"
 	"github.com/tmc/langchaingo/embeddings"
+	"github.com/tmc/langchaingo/llms"
 	"github.com/tmc/langchaingo/llms/ollama"
 	"github.com/tmc/langchaingo/schema"
 	"github.com/tmc/langchaingo/textsplitter"
@@ -30,22 +31,32 @@ Answer the question based on the above context: %s
 
 func main() {
 	redisURL := "redis://127.0.0.1:6379"
-	index := "test_redis_rag"
 
-	load := flag.Bool("load", false, "Load data")
+	load := flag.String("load", "", "Load file")
 	query := flag.String("query", "", "Prompt to use for query")
+	// test_redis_rag
+	index := flag.String("index", "", "Which index to use for load or query")
 
 	flag.Parse()
 
-	llm, err := ollama.New(ollama.WithModel("llama3.1:8b"))
+	if *index == "" {
+		log.Fatalln("The --index option is required")
+	}
+
+	llmForPrompt, err := ollama.New(ollama.WithModel("llama3.1:8b"))
+	// llmForPrompt, err := ollama.New(ollama.WithModel("mistral"))
 	if err != nil {
 		log.Fatal(err)
 	}
-	embedder := embeddingFunction(llm)
+	llmForLookup, err := ollama.New(ollama.WithModel("gemma:2b"))
+	if err != nil {
+		log.Fatal(err)
+	}
+	embedder := embeddingFunction(llmForLookup)
 
 	db, err := redisvector.New(context.Background(),
 		redisvector.WithConnectionURL(redisURL),
-		redisvector.WithIndexName(index, true),
+		redisvector.WithIndexName(*index, true),
 		redisvector.WithEmbedder(embedder),
 	)
 	if err != nil {
@@ -68,21 +79,21 @@ func main() {
 	// 	log.Fatal(err)
 	// }
 	// fmt.Println(completion)
-	if *load {
+	if *load != "" {
 		// filename := "data/vam.pdf"
-		filename := "data/monopoly.txt"
+		filename := *load
 		documents := loadDocuments(filename)
 		addToStore(db, filename, documents)
 		// fmt.Println(documents)
 	}
 
 	if *query != "" {
-		queryRag(*query, db)
+		queryRag(*query, db, llmForPrompt)
 	}
 
 }
 
-func queryRag(query string, db *redisvector.Store) {
+func queryRag(query string, db *redisvector.Store, llm *ollama.LLM) {
 	slog.Info("Querying database", "query", query)
 	results, err := db.SimilaritySearch(context.TODO(), query, 5,
 		vectorstores.WithScoreThreshold(0.5))
@@ -91,9 +102,29 @@ func queryRag(query string, db *redisvector.Store) {
 	}
 
 	slog.Info("Results", "results", results)
+	contextText := ""
 	for _, r := range results {
-		fmt.Println(r.PageContent)
+		// fmt.Println(r.PageContent)
+		contextText += r.PageContent
+		contextText += "\n\n---\n\n"
 	}
+
+	finalPrompt := fmt.Sprintf(PROMPT_TEMPLATE, contextText, query)
+	slog.Info("Final promp", "finalPrompt", finalPrompt)
+
+	content := []llms.MessageContent{
+		llms.TextParts(llms.ChatMessageTypeSystem, contextText),
+		llms.TextParts(llms.ChatMessageTypeHuman, query),
+	}
+	completion, err := llm.GenerateContent(context.Background(), content, llms.WithStreamingFunc(func(ctx context.Context, chunk []byte) error {
+		fmt.Print(string(chunk))
+		return nil
+	}))
+	if err != nil {
+		slog.Error("Error while generating content", "err", err)
+	}
+
+	fmt.Println(completion)
 
 }
 
@@ -114,8 +145,9 @@ func loadDocuments(filename string) []schema.Document {
 
 func splitDocuments(inputDocument documentloaders.Text) []schema.Document {
 	textSplitter := textsplitter.NewRecursiveCharacter()
-	textSplitter.ChunkSize = 300
-	textSplitter.ChunkOverlap = 30
+	// textSplitter.Separators = []string{"\n\n"}
+	textSplitter.ChunkSize = 500
+	textSplitter.ChunkOverlap = 50
 
 	documents, err := inputDocument.LoadAndSplit(context.Background(), textSplitter)
 	if err != nil {
