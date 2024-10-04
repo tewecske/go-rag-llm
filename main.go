@@ -43,16 +43,17 @@ func main() {
 		log.Fatalln("The --index option is required")
 	}
 
-	llmForPrompt, err := ollama.New(ollama.WithModel("llama3.1:8b"))
-	// llmForPrompt, err := ollama.New(ollama.WithModel("mistral"))
+	// llmForPrompt, err := ollama.New(ollama.WithModel("llama3.1:8b"))
+	llmForPrompt, err := ollama.New(ollama.WithModel("mistral"))
 	if err != nil {
 		log.Fatal(err)
 	}
-	llmForLookup, err := ollama.New(ollama.WithModel("gemma:2b"))
+	// llmForEmbed, err := ollama.New(ollama.WithModel("gemma:2b"))
+	llmForEmbed, err := ollama.New(ollama.WithModel("nomic-embed-text"))
 	if err != nil {
 		log.Fatal(err)
 	}
-	embedder := embeddingFunction(llmForLookup)
+	embedder := embeddingFunction(llmForEmbed)
 
 	db, err := redisvector.New(context.Background(),
 		redisvector.WithConnectionURL(redisURL),
@@ -88,23 +89,28 @@ func main() {
 	}
 
 	if *query != "" {
-		queryRag(*query, db, llmForPrompt)
+		queryRag(*query, db, llmForPrompt, embedder)
 	}
 
 }
 
-func queryRag(query string, db *redisvector.Store, llm *ollama.LLM) {
+func queryRag(query string, db *redisvector.Store, llm *ollama.LLM, embedder embeddings.Embedder) {
 	slog.Info("Querying database", "query", query)
-	results, err := db.SimilaritySearch(context.TODO(), query, 5,
-		vectorstores.WithScoreThreshold(0.5))
+	embedderData, err := embedder.EmbedQuery(context.Background(), query)
+	if err != nil {
+		slog.Error("Error in embedding", "err", err, "query", query)
+	}
+	slog.Info("Embedding", "data", embedderData)
+	results, err := db.SimilaritySearch(context.TODO(), query, 15,
+		vectorstores.WithScoreThreshold(0.7))
 	if err != nil {
 		slog.Error("Error in similarity search", "err", err, "query", query)
 	}
 
-	slog.Info("Results", "results", results)
+	// slog.Info("Results", "results", results)
 	contextText := ""
 	for _, r := range results {
-		// fmt.Println(r.PageContent)
+		slog.Info("Context", "PageContent", r.PageContent)
 		contextText += r.PageContent
 		contextText += "\n\n---\n\n"
 	}
@@ -113,10 +119,11 @@ func queryRag(query string, db *redisvector.Store, llm *ollama.LLM) {
 	slog.Info("Final promp", "finalPrompt", finalPrompt)
 
 	content := []llms.MessageContent{
-		llms.TextParts(llms.ChatMessageTypeSystem, contextText),
-		llms.TextParts(llms.ChatMessageTypeHuman, query),
+		// llms.TextParts(llms.ChatMessageTypeSystem, contextText),
+		// llms.TextParts(llms.ChatMessageTypeHuman, query),
+		llms.TextParts(llms.ChatMessageTypeHuman, finalPrompt),
 	}
-	completion, err := llm.GenerateContent(context.Background(), content, llms.WithStreamingFunc(func(ctx context.Context, chunk []byte) error {
+	_, err = llm.GenerateContent(context.Background(), content, llms.WithStreamingFunc(func(ctx context.Context, chunk []byte) error {
 		fmt.Print(string(chunk))
 		return nil
 	}))
@@ -124,8 +131,23 @@ func queryRag(query string, db *redisvector.Store, llm *ollama.LLM) {
 		slog.Error("Error while generating content", "err", err)
 	}
 
-	fmt.Println(completion)
+	// for _, c := range completion.Choices {
+	// 	fmt.Println(c.Content)
+	// }
 
+	fmt.Println()
+	var meta []any
+	for _, r := range results {
+		for k, m := range r.Metadata {
+			// slog.Info("Metadata", "k", k, "m", m)
+			if k == "id" {
+				meta = append(meta, m)
+			}
+		}
+
+	}
+
+	fmt.Println("Source", "Metadata", meta)
 }
 
 func loadDocuments(filename string) []schema.Document {
